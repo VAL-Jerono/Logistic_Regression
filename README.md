@@ -246,5 +246,21 @@ The notebook ends with working stubs for five natural extensions:
 
 ---
 
+## Who This Is For
+
+- Students encountering logistic regression for the first time who want to understand the *why*, not just the *how*
+- Practitioners who have used `glm()` but never felt confident interpreting the output
+- Instructors who want a ready-made, heavily commented classroom notebook
+
+By the end, the pipeline you have built — correlation-filtered features, leak-free normalisation, properly cast outcome, rigorous multi-metric evaluation — transfers directly to any binary classification problem you will ever face.
+
+---
+
+
+
+
+
+
+*Built with R · tidyverse · caret · pROC · MLmetrics · broom*
 *Everything here transfers directly to any binary classification problem you will
 ever face. The dataset changes. The pipeline does not.*
