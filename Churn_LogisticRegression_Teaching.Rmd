@@ -1,0 +1,1121 @@
+---
+title: "Customer Churn Prediction — Logistic Regression"
+subtitle: "A Complete Teaching Notebook | From Raw Data to Confident Interpretation"
+author: "Instructor Edition"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL CHUNK OPTIONS
+#
+# echo    = TRUE   — Always show code. This is a teaching notebook; every line
+#                    of code is part of the lesson.
+# message = FALSE  — Suppress package-load messages (informative but noisy).
+# warning = FALSE  — Suppress warnings so the rendered HTML stays readable.
+# fig.*            — Consistent figure dimensions across all plots.
+# ─────────────────────────────────────────────────────────────────────────────
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+```
+
+---
+
+# Welcome — What This Notebook Teaches
+
+This notebook teaches logistic regression from first principles using a
+real-world telecom churn dataset. Every decision — why we convert the outcome
+to a factor, why we normalise features, which loss function the model minimises
+— is explained before any code is written. By the end you will know not just
+*how* to run logistic regression in R, but *why* every step exists.
+
+---
+
+## The Business Problem
+
+A telecom company needs to answer one question: which customers are likely to
+cancel their subscription (churn)? Predicting churn before it happens allows
+the business to intervene — offer discounts, improve service, or reach out
+proactively — and protect revenue.
+
+This is a **supervised binary classification** problem.
+
+| Label | Meaning |
+|-------|---------|
+| `1` (becomes `"Yes"`) | Customer churned — cancelled their service |
+| `0` (becomes `"No"`)  | Customer stayed — did not cancel |
+
+---
+
+## Why Logistic Regression, Not Linear Regression?
+
+**Linear regression predicts a continuous number** — house price, temperature,
+revenue. Forced to predict churn, it can output values such as `1.8` or `-0.3`,
+which are not valid probabilities.
+
+**Logistic regression** wraps the linear predictor inside a sigmoid function
+that maps any real number into the interval (0, 1):
+
+$$P(\text{churn} = 1 \mid \mathbf{x}) = \frac{1}{1 + e^{-(\beta_0 + \beta_1 x_1 + \cdots + \beta_k x_k)}}$$
+
+Taking the log-odds (logit) of that probability recovers linearity:
+
+$$\text{logit}(p) = \log\!\left(\frac{p}{1-p}\right) = \beta_0 + \beta_1 x_1 + \cdots + \beta_k x_k$$
+
+Logistic regression is a linear model — but it operates in log-odds space, and
+the sigmoid back-transformation ensures every output is a valid probability.
+
+---
+
+## Roadmap
+
+| Step | Task | Why It Matters |
+|------|------|----------------|
+| 1 | Load libraries | Make all tools available upfront |
+| 2 | Load and explore data | Understand the data before touching the model |
+| 3 | Cast response to factor | Required for `glm()` to apply logistic, not linear, regression |
+| 4 | Select features thoughtfully | Remove noise; reduce multicollinearity |
+| 5 | Normalise features | Guarantee optimiser convergence |
+| 6 | Train / test split | Enable honest evaluation on unseen data |
+| 7 | Train the model | Fit logistic regression with `glm()` |
+| 8 | Evaluate with loss function and metrics | Measure model quality rigorously |
+| 9 | Interpret coefficients | Understand what the model is actually saying |
+
+---
+
+# Step 1 — Load Libraries
+
+Load all packages at the very top of the notebook. This makes every dependency
+explicit and prevents cryptic "function not found" errors that appear mid-analysis
+when a package was never loaded.
+
+```{r load-libraries}
+# ── Core data wrangling and visualisation ──────────────────────────────────────
+library(tidyverse)     # dplyr, ggplot2, readr, tidyr, purrr, forcats
+library(corrplot)      # heat-map style correlation matrix
+library(scales)        # nice axis labels: percent(), comma(), dollar()
+
+# ── Machine-learning pipeline ──────────────────────────────────────────────────
+library(caret)         # createDataPartition(), preProcess(), confusionMatrix()
+
+# ── Model evaluation ───────────────────────────────────────────────────────────
+library(pROC)          # roc(), auc() — ROC curve and AUC-ROC metric
+library(MLmetrics)     # LogLoss() — the loss function logistic regression minimises
+
+# ── Coefficient interpretation ─────────────────────────────────────────────────
+library(broom)         # tidy() — turns messy glm() output into a clean data frame
+
+# ── Table formatting ───────────────────────────────────────────────────────────
+library(knitr)         # kable() — renders clean HTML tables in the notebook
+library(kableExtra)    # row/column-level styling for kable tables
+
+cat("All libraries loaded successfully.\n")
+```
+
+---
+
+# Step 2 — Load and Explore the Data
+
+Never skip exploratory data analysis. A model is only as good as your
+understanding of the data. EDA reveals missing values, unusual ranges, class
+imbalance, and which features look promising — all before you touch the model.
+
+## 2a — Load the Dataset
+
+```{r load-data}
+# read_csv() from readr (part of tidyverse) is faster and more type-consistent
+# than base R's read.csv(). Critically, it never silently converts strings to
+# factors, which avoids a whole class of subtle bugs.
+#
+# IMPORTANT: ChurnData.csv must be in your R working directory.
+#   Check your current directory  :  getwd()
+#   Change it                     :  setwd("path/to/your/folder")
+#                                    or use the Files pane in RStudio.
+
+df <- read_csv("ChurnData.csv")
+
+cat("-----------------------------------\n")
+cat(" DATASET OVERVIEW\n")
+cat("-----------------------------------\n")
+cat(sprintf("  Rows    : %d customers\n",  nrow(df)))
+cat(sprintf("  Columns : %d features\n\n", ncol(df)))
+
+# Display the first six rows as a formatted table for a quick sanity check
+head(df) %>%
+  kable(caption = "First 6 rows of ChurnData") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    font_size  = 12
+  )
+```
+
+## 2b — Data Types and Structure
+
+```{r eda-structure}
+# glimpse() is the tidyverse equivalent of str() or Python's df.info().
+# It shows: column names, data types, and a short preview of values in each column.
+#
+# KEY OBSERVATION: All columns will likely show as <dbl> (numeric) —
+# including 'churn'. That means 'churn' is stored as 0 / 1 integers,
+# not as a category. We must fix this before modelling. Step 3 explains why.
+
+glimpse(df)
+```
+
+## 2c — Summary Statistics
+
+```{r eda-summary}
+# summary() provides the five-number summary (min, Q1, median, Q3, max)
+# plus the mean for every numeric column.
+#
+# Things to look for:
+#   - Wide numeric ranges (e.g. 'income' running 0 to 1600 vs a binary 0/1 flag).
+#     This confirms that normalisation is essential before model training (Step 5).
+#   - Any column where Min == Max: zero variance, carries no useful information.
+#   - NA counts appearing in any column: missing values must be handled first.
+
+summary(df)
+```
+
+## 2d — Missing Value Audit
+
+```{r eda-missing}
+# Missing values corrupt model training silently if left unaddressed.
+# We audit every column before proceeding.
+
+missing_counts <- colSums(is.na(df))
+
+if (sum(missing_counts) == 0) {
+  cat("No missing values found. Clean dataset — we can proceed.\n")
+} else {
+  cat("Missing values detected:\n")
+  missing_counts[missing_counts > 0] %>%
+    as.data.frame() %>%
+    setNames("Missing Count") %>%
+    kable(caption = "Columns with missing values") %>%
+    kable_styling(bootstrap_options = "striped", full_width = FALSE)
+}
+```
+
+---
+
+# Step 3 — Cast the Response Variable to a Factor
+
+**This is one of the most commonly missed steps. It changes the model fundamentally.**
+
+## Why This Step Cannot Be Skipped
+
+When `churn` is stored as numeric (0.0 / 1.0), R's `glm()` treats it as a
+continuous outcome and fits **linear regression** — not logistic. The consequences
+are severe:
+
+- Predictions are not bounded to [0, 1]; values like -0.2 or 1.4 are possible.
+- Coefficients are estimated by ordinary least squares, not maximum likelihood.
+- The sigmoid link function is never applied.
+
+Converting `churn` to a **factor** explicitly signals to `glm()`:
+*"This is a categorical outcome with two levels — apply the binomial family
+and the logit link function."*
+
+```{r response-variable}
+# ── BEFORE: numeric representation ────────────────────────────────────────────
+cat("BEFORE casting:\n")
+cat("  R class       :", class(df$churn), "\n")
+cat("  Unique values :", paste(sort(unique(df$churn)), collapse = ", "), "\n\n")
+
+# ── Cast to factor ─────────────────────────────────────────────────────────────
+# levels = c(0, 1)         Explicit ordering — 0 becomes the reference level.
+# labels = c("No", "Yes")  Human-readable labels (much clearer in model output).
+#
+# WHY put "No" first?
+# R treats the FIRST factor level as the reference (baseline) category.
+# Every coefficient therefore represents the change in log-odds of "Yes" (churn)
+# relative to "No" (no churn). This is the standard, intuitive interpretation.
+
+df$churn <- factor(df$churn, levels = c(0, 1), labels = c("No", "Yes"))
+
+# ── AFTER: factor representation ──────────────────────────────────────────────
+cat("AFTER casting:\n")
+cat("  R class :", class(df$churn), "\n")
+cat("  Levels  :", paste(levels(df$churn), collapse = " -> "), "\n\n")
+
+cat("Class distribution:\n")
+print(table(df$churn))
+```
+
+## Class Balance Check
+
+```{r class-balance-plot}
+# If 95% of customers are "No" and only 5% are "Yes", a naive model that
+# always predicts "No" achieves 95% accuracy while being completely useless
+# at identifying actual churners — the entire purpose of the model.
+#
+# A severe imbalance signals that:
+#   - Accuracy is a misleading headline metric; prefer AUC-ROC and Log-Loss.
+#   - Techniques like oversampling (SMOTE) or class weighting may be needed.
+
+churn_counts       <- as.data.frame(table(df$churn))
+names(churn_counts) <- c("Churn", "Count")
+churn_counts$Pct   <- churn_counts$Count / sum(churn_counts$Count)
+churn_counts$Label <- c("Did Not Churn (No)", "Churned (Yes)")
+
+ggplot(churn_counts, aes(x = Label, y = Count, fill = Label)) +
+  geom_col(width = 0.5, colour = "white", linewidth = 0.8) +
+  geom_text(
+    aes(label = paste0(Count, "\n(", percent(Pct, accuracy = 0.1), ")")),
+    vjust = -0.4, fontface = "bold", size = 5
+  ) +
+  scale_fill_manual(
+    values = c("Did Not Churn (No)" = "steelblue", "Churned (Yes)" = "tomato")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title    = "Churn Class Distribution",
+    subtitle = "Balanced is near 50/50. A highly skewed split requires careful metric choice.",
+    x = NULL,
+    y = "Number of Customers"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold"))
+```
+
+**Interpretation:** If the split is severely unequal, overall accuracy is a
+misleading metric. This notebook evaluates the model with AUC-ROC and Log-Loss,
+which are robust to class imbalance and tell a more honest story.
+
+---
+
+# Step 4 — Thoughtful Feature Selection
+
+Including every column in your model is tempting but harmful. Irrelevant features
+add noise. Correlated features distort coefficient estimates. Feature selection
+is a deliberate craft, not an afterthought.
+
+## 4a — Why Feature Selection Matters
+
+| Problem | Consequence if ignored |
+|---------|------------------------|
+| Noise features | Model learns spurious patterns; generalises poorly to new data |
+| Multicollinearity | Two correlated predictors share variance — coefficients become unstable and uninterpretable |
+| Too many predictors | Risk of overfitting — model memorises training data, fails on test data |
+
+## 4b — Point-Biserial Correlation With Churn
+
+```{r feature-correlation}
+# When one variable is binary (churn: 0/1) and the other is continuous,
+# Pearson's r is mathematically equivalent to the point-biserial correlation
+# — a valid measure of linear association between a continuous and a binary variable.
+#
+# Strategy: keep only features where |r| > 0.10 with churn.
+# Features below this threshold have almost no linear relationship with the
+# outcome and are unlikely to contribute meaningfully to the model.
+
+# Temporarily restore churn to 0/1 numeric for the correlation calculation
+churn_numeric <- as.numeric(df$churn) - 1   # "Yes"=2 -> 1, "No"=1 -> 0
+
+# Identify all numeric predictor columns (churn itself excluded)
+numeric_cols <- df %>%
+  select(where(is.numeric)) %>%
+  names()
+
+# Compute the correlation of every numeric feature with churn
+corr_with_churn <- sapply(numeric_cols, function(col) {
+  cor(df[[col]], churn_numeric, use = "complete.obs")
+})
+
+# Build a sorted table — strongest absolute correlations at the top
+corr_df <- tibble(
+  Feature     = names(corr_with_churn),
+  Correlation = corr_with_churn
+) %>%
+  arrange(desc(abs(Correlation)))
+
+cat("Pearson correlation of each feature with 'churn' (sorted by absolute value):\n\n")
+
+corr_df %>%
+  mutate(
+    Correlation = round(Correlation, 3),
+    Strength = case_when(
+      abs(Correlation) >= 0.30 ~ "Strong",
+      abs(Correlation) >= 0.10 ~ "Moderate",
+      TRUE                     ~ "Weak — will be dropped"
+    )
+  ) %>%
+  kable(caption = "Feature-Churn Correlation (point-biserial)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(which(abs(corr_df$Correlation) <= 0.10), color = "grey")
+```
+
+## 4c — Visualise Correlations
+
+```{r correlation-barplot}
+# A horizontal bar chart makes the direction and magnitude of each relationship
+# easy to read at a glance.
+
+corr_df_plot <- corr_df %>%
+  mutate(Direction = ifelse(Correlation > 0, "Positive", "Negative"))
+
+ggplot(corr_df_plot,
+       aes(x = Correlation,
+           y = reorder(Feature, abs(Correlation)),
+           fill = Direction)) +
+  geom_col(colour = "white", linewidth = 0.4) +
+  geom_vline(xintercept =  0.10, linetype = "dashed",
+             colour = "forestgreen", linewidth = 0.9) +
+  geom_vline(xintercept = -0.10, linetype = "dashed",
+             colour = "forestgreen", linewidth = 0.9) +
+  geom_vline(xintercept = 0, colour = "black", linewidth = 0.4) +
+  scale_fill_manual(values = c("Negative" = "steelblue", "Positive" = "tomato")) +
+  annotate("text", x =  0.12, y = 1.5, label = "Keep threshold (+0.10)",
+           colour = "forestgreen", size = 3.2, hjust = 0) +
+  annotate("text", x = -0.12, y = 1.5, label = "Keep threshold (-0.10)",
+           colour = "forestgreen", size = 3.2, hjust = 1) +
+  labs(
+    title    = "Feature Correlation With Churn",
+    subtitle = "Green dashed lines mark the selection threshold (|r| = 0.10). Features outside are retained.",
+    x        = "Pearson Correlation Coefficient (r)",
+    y        = NULL,
+    fill     = "Direction"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## 4d — Apply the Threshold
+
+```{r select-features}
+# Retain only features whose absolute correlation with churn exceeds the threshold.
+# A constant of 0.10 is used here; in practice you may adjust this based on
+# domain knowledge or cross-validation experiments.
+
+THRESHOLD <- 0.10
+
+selected_features <- corr_df %>%
+  filter(abs(Correlation) > THRESHOLD) %>%
+  pull(Feature)
+
+cat(sprintf("Features retained (|r| > %.2f): %d out of %d total\n\n",
+            THRESHOLD, length(selected_features), nrow(corr_df)))
+cat("Selected features:\n")
+cat(paste(" -", selected_features, collapse = "\n"), "\n")
+```
+
+## 4e — Multicollinearity Check Between Predictors
+
+```{r multicollinearity-heatmap}
+# So far we have examined how each feature correlates with CHURN.
+# Now we check how the selected features correlate with EACH OTHER.
+#
+# Multicollinearity occurs when two predictor variables are highly correlated
+# with one another. Including both:
+#   - Makes coefficient estimates unstable (high variance)
+#   - Inflates standard errors, making p-values unreliable
+#   - Prevents the model from distinguishing which variable is doing the work
+#
+# Rule of thumb: if |r| > 0.80 between two predictors, drop one of them.
+
+feat_corr_matrix <- df %>%
+  select(all_of(selected_features)) %>%
+  cor(use = "complete.obs")
+
+corrplot(
+  feat_corr_matrix,
+  method      = "color",
+  type        = "lower",
+  tl.cex      = 0.75,
+  tl.col      = "black",
+  addCoef.col = "black",
+  number.cex  = 0.55,
+  col         = colorRampPalette(c("steelblue", "white", "tomato"))(200),
+  title       = "Feature-Feature Correlation Matrix (Multicollinearity Check)",
+  mar         = c(0, 0, 2, 0)
+)
+```
+
+## 4f — Remove Collinear Duplicates
+
+```{r remove-collinear}
+# Reading the heatmap above:
+#
+# 'loglong' is the natural-log transform of 'longmon'  — same information, different scale
+# 'lninc'   is the natural-log transform of 'income'   — same information, different scale
+#
+# Including both versions of the same information inflates coefficient variance
+# and makes the model harder to interpret.
+#
+# DECISION: Keep the original untransformed variables (longmon, income) because:
+#   - They are on interpretable scales (minutes of calls; dollars of income).
+#   - After normalisation in Step 5, the log transforms offer no additional benefit.
+
+features_to_drop  <- c("loglong", "lninc")
+selected_features <- setdiff(selected_features, features_to_drop)
+
+cat(sprintf("Final feature set: %d features (removed %d log-transform duplicates)\n\n",
+            length(selected_features), length(features_to_drop)))
+
+corr_df %>%
+  filter(Feature %in% selected_features) %>%
+  arrange(desc(abs(Correlation))) %>%
+  mutate(
+    Correlation    = round(Correlation, 3),
+    Interpretation = ifelse(
+      Correlation > 0,
+      "Higher value -> more likely to churn",
+      "Higher value -> less likely to churn"
+    )
+  ) %>%
+  kable(caption = "Final selected features with churn correlation") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+# Step 5 — Normalisation (Ensuring Convergence)
+
+Normalisation is one of the most frequently skipped steps by beginners — and one
+of the most consequential.
+
+## Why Normalisation Is Essential for Logistic Regression
+
+R's `glm()` fits logistic regression using **Iteratively Reweighted Least Squares
+(IRLS)**, an iterative algorithm that takes gradient steps — small coefficient
+updates at each iteration — guided by the curvature of the log-likelihood surface.
+
+**The problem:** If `income` ranges from 0 to 1,600 and a binary flag sits at 0
+or 1, the gradient updates for each feature operate on completely different scales.
+The optimiser either takes infinitesimally small steps for large-scale features
+(very slow convergence) or overshoots for small-scale features (oscillation or
+outright failure to converge).
+
+**The solution — z-score standardisation:**
+
+$$z = \frac{x - \mu_{\text{train}}}{\sigma_{\text{train}}}$$
+
+After scaling every feature has mean = 0 and standard deviation = 1. The optimiser
+works in a uniform space and converges reliably.
+
+**Critical rule — no data leakage:**  
+The scaler must be *fitted on training data only*, then *applied* to both sets.
+If you fit on the full dataset (including the test set), test-set information
+bleeds into the training process — a mistake called data leakage that
+artificially inflates evaluation metrics.
+
+## 5a — Train / Test Split First
+
+```{r train-test-split}
+# ── Prepare the modelling dataset ─────────────────────────────────────────────
+# Select only the retained features plus the target variable.
+
+model_df <- df %>%
+  select(all_of(c(selected_features, "churn")))
+
+# ── Stratified 80 / 20 split ──────────────────────────────────────────────────
+# "Stratified" means the churn proportion is preserved in BOTH the training
+# and test sets. Without stratification, the test set might — by random chance
+# — contain very few churners, making evaluation unreliable.
+#
+# set.seed(42) ensures reproducibility: every run of this notebook produces
+# exactly the same training and test rows.
+
+set.seed(42)
+
+train_idx <- createDataPartition(
+  model_df$churn,
+  p     = 0.80,    # 80% goes to training
+  list  = FALSE,
+  times = 1
+)
+
+train_df <- model_df[ train_idx, ]   # rows IN the partition -> training set
+test_df  <- model_df[-train_idx, ]   # rows NOT in partition -> test set
+
+cat("-----------------------------------\n")
+cat(" TRAIN / TEST SPLIT\n")
+cat("-----------------------------------\n")
+cat(sprintf("  Training samples : %d (%.0f%%)\n",
+            nrow(train_df), 100 * nrow(train_df) / nrow(model_df)))
+cat(sprintf("  Test samples     : %d (%.0f%%)\n",
+            nrow(test_df),  100 * nrow(test_df)  / nrow(model_df)))
+cat(sprintf("\n  Churn rate — train : %s\n",
+            percent(mean(train_df$churn == "Yes"), accuracy = 0.1)))
+cat(sprintf("  Churn rate — test  : %s  (should be close to train if stratified)\n",
+            percent(mean(test_df$churn  == "Yes"), accuracy = 0.1)))
+```
+
+## 5b — Fit the Scaler and Apply
+
+```{r normalise}
+# ── Step 1: Fit preProcess parameters on the TRAINING SET ONLY ────────────────
+# "center" = subtract the training mean from each feature column.
+# "scale"  = divide by the training standard deviation.
+# Together these implement z-score standardisation.
+#
+# The target variable (churn) must be excluded — it must not be transformed.
+
+preproc <- preProcess(
+  train_df %>% select(-churn),
+  method = c("center", "scale")
+)
+
+# ── Step 2: Apply the SAME parameters to both sets ────────────────────────────
+# predict() here does not make predictions — it applies the fitted transformation.
+# This naming follows the standard caret interface for preProcess objects.
+
+train_scaled <- predict(preproc, train_df)
+test_scaled  <- predict(preproc, test_df)
+
+# ── Step 3: Verify the scaling worked ─────────────────────────────────────────
+means_after <- train_scaled %>% select(-churn) %>% summarise(across(everything(), mean))
+sds_after   <- train_scaled %>% select(-churn) %>% summarise(across(everything(), sd))
+
+cat("Post-scaling verification (training set):\n")
+cat(sprintf("  Grand mean of all feature means : %.8f  (target: 0)\n",
+            mean(unlist(means_after))))
+cat(sprintf("  Grand mean of all feature SDs   : %.8f  (target: 1)\n",
+            mean(unlist(sds_after))))
+cat("\nScaling confirmed. The optimiser will now work in a uniform space.\n")
+```
+
+## 5c — Visualise the Effect of Scaling
+
+```{r normalisation-plot}
+# Side-by-side histograms for 'longmon' before and after scaling.
+#
+# The key teaching point: the SHAPE of the distribution is identical in both
+# panels. Only the axis units change — from raw minutes to standard deviations
+# from the mean. Scaling re-expresses data in a common unit; it does not distort
+# relationships or alter the relative ordering of observations.
+
+feat <- "longmon"
+
+before_vals <- train_df[[feat]]
+after_vals  <- train_scaled[[feat]]
+
+par(mfrow = c(1, 2), mar = c(5, 4, 4, 2))
+
+hist(before_vals,
+     main   = paste(feat, "- BEFORE Scaling"),
+     xlab   = sprintf("Original value  (mean = %.1f, SD = %.1f)",
+                      mean(before_vals), sd(before_vals)),
+     col    = "steelblue",
+     border = "white",
+     breaks = 20)
+abline(v = mean(before_vals), col = "red", lwd = 2, lty = 2)
+
+hist(after_vals,
+     main   = paste(feat, "- AFTER Scaling"),
+     xlab   = sprintf("Z-score  (mean = %.4f, SD = %.4f)",
+                      mean(after_vals), sd(after_vals)),
+     col    = "tomato",
+     border = "white",
+     breaks = 20)
+abline(v = 0, col = "darkred", lwd = 2, lty = 2)
+
+par(mfrow = c(1, 1))
+```
+
+---
+
+# Step 6 — Train the Logistic Regression Model
+
+Once the data is correctly prepared, the modelling step itself is concise.
+The hard work was in Steps 3 through 5.
+
+## How glm() Fits Logistic Regression
+
+| Argument | Meaning |
+|----------|---------|
+| `churn ~ .` | Predict `churn` using all remaining columns as predictors |
+| `family = binomial` | The outcome is binary — use the binomial family |
+| `link = "logit"` | Apply the log-odds link function — the standard for binary outcomes |
+
+Internally, R uses IRLS: it repeatedly adjusts coefficients to maximise the
+log-likelihood of observing the training labels given the current parameter
+estimates. Convergence is reached when the change in log-likelihood between
+iterations falls below a small tolerance.
+
+```{r train-model}
+# ── Fit the logistic regression model ─────────────────────────────────────────
+model <- glm(
+  churn ~ .,
+  data   = train_scaled,
+  family = binomial(link = "logit")
+)
+
+cat("Model trained successfully.\n\n")
+cat("What this model learns:\n")
+cat("  logit(P(churn = Yes)) = b0 + b1*x1 + b2*x2 + ... + bk*xk\n\n")
+cat("  where logit(p) = log(p / (1-p))  -- the log of the odds ratio\n")
+cat("  To recover a probability: P = 1 / (1 + exp(-linear predictor))\n")
+```
+
+## 6b — Raw Model Summary
+
+```{r model-summary}
+# Reading the glm() summary output:
+#
+#   Estimate   : beta coefficient in LOG-ODDS units.
+#                Positive  => feature increases the odds of churn.
+#                Negative  => feature decreases the odds of churn.
+#
+#   Std. Error : uncertainty around the estimate.
+#                A large standard error signals low confidence in that coefficient.
+#
+#   z value    : Estimate / Std. Error (Wald test statistic).
+#                A large absolute z value means the coefficient is far from zero.
+#
+#   Pr(>|z|)   : p-value for the Wald test.
+#                < 0.05  (*)   significant at the 5% level
+#                < 0.01  (**)  significant at the 1% level
+#                < 0.001 (***) significant at the 0.1% level
+
+summary(model)
+```
+
+## 6c — Odds Ratio Interpretation
+
+```{r odds-ratios}
+# Log-odds coefficients are mathematically convenient but hard to interpret
+# intuitively. Exponentiating them gives ODDS RATIOS, which are much easier
+# to communicate:
+#
+#   OR > 1  =>  feature INCREASES churn odds
+#   OR < 1  =>  feature DECREASES churn odds
+#   OR = 1  =>  feature has no effect on churn odds
+#
+# Example: OR = 1.50 for 'longmon' means a 1-SD increase in long-distance
+# minutes is associated with 50% higher odds of churning, all else held constant.
+
+coef_table <- tidy(model, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    OddsRatio  = round(exp(estimate), 3),
+    OR_CI_Low  = round(exp(conf.low),  3),
+    OR_CI_High = round(exp(conf.high), 3),
+    p.value    = round(p.value, 4),
+    Significant = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "** ",
+      p.value < 0.05  ~ "*  ",
+      TRUE            ~ "   "
+    ),
+    Effect = ifelse(OddsRatio > 1, "Increases churn odds", "Decreases churn odds")
+  ) %>%
+  select(term, OddsRatio, OR_CI_Low, OR_CI_High, p.value, Significant, Effect) %>%
+  arrange(desc(OddsRatio))
+
+coef_table %>%
+  kable(caption = "Odds Ratios — Effect of each feature on churn odds (per 1 SD change)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE,
+              color = ifelse(coef_table$Effect == "Increases churn odds",
+                             "tomato", "steelblue"))
+```
+
+## 6d — Coefficient Forest Plot
+
+```{r coefficient-plot}
+# A forest plot shows each coefficient in log-odds space with its 95%
+# confidence interval bar.
+#
+# If a confidence interval bar CROSSES ZERO, the effect may not be
+# statistically reliable. Zero in log-odds corresponds to an odds ratio
+# of 1, meaning no effect on churn odds.
+
+coef_df <- tidy(model, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(abs(estimate)))
+
+ggplot(coef_df, aes(x = estimate,
+                     y = reorder(term, abs(estimate)),
+                     colour = estimate > 0)) +
+  geom_vline(xintercept = 0, colour = "grey50", linetype = "dashed", linewidth = 0.8) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.3, linewidth = 0.8) +
+  geom_point(size = 4) +
+  scale_colour_manual(
+    values = c("FALSE" = "steelblue", "TRUE" = "tomato"),
+    labels = c("FALSE" = "Decreases churn odds", "TRUE" = "Increases churn odds")
+  ) +
+  labs(
+    title    = "Logistic Regression Coefficients (Log-Odds Scale)",
+    subtitle = "Error bars show 95% confidence intervals. Bars crossing zero are statistically uncertain.",
+    x        = "Coefficient (log-odds)",
+    y        = NULL,
+    colour   = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold"))
+```
+
+---
+
+# Step 7 — Model Evaluation
+
+Accuracy alone is a poor metric for imbalanced classification. We use several
+complementary measures to build a complete picture of model quality.
+
+## 7a — The Loss Function: Log-Loss (Binary Cross-Entropy)
+
+The **loss function** is the quantity logistic regression *minimises* during
+training. For binary classification this is **log-loss**, also called binary
+cross-entropy:
+
+$$\mathcal{L} = -\frac{1}{n} \sum_{i=1}^{n} \Bigl[ y_i \cdot \log(\hat{p}_i) + (1 - y_i) \cdot \log(1 - \hat{p}_i) \Bigr]$$
+
+**Intuition:** log-loss heavily penalises *confident wrong predictions*. If the
+model assigns P(churn) = 0.99 to a customer who did not churn, that single
+observation contributes a large penalty. The model therefore learns to be
+well-calibrated — not merely directionally correct, but appropriately uncertain
+when the signal is weak.
+
+| Log-Loss value | Interpretation |
+|----------------|----------------|
+| Close to 0 | Nearly perfect model |
+| 0.693 (ln 2) | Random classifier — coin-flip baseline |
+| Greater than 0.693 | Worse than random guessing |
+
+```{r log-loss}
+# ── Obtain predicted probabilities ────────────────────────────────────────────
+# type = "response" returns P(churn = "Yes") in [0, 1].
+# type = "link" would return raw log-odds — not what metric functions expect.
+
+train_prob <- predict(model, newdata = train_scaled, type = "response")
+test_prob  <- predict(model, newdata = test_scaled,  type = "response")
+
+# Convert factor labels to 0 / 1 numeric for the metric functions
+y_train_num <- as.numeric(train_scaled$churn) - 1   # "Yes" -> 1, "No" -> 0
+y_test_num  <- as.numeric(test_scaled$churn)  - 1
+
+# ── Compute Log-Loss ──────────────────────────────────────────────────────────
+# MLmetrics::LogLoss(y_pred, y_true)  -- predictions first, true labels second
+train_logloss <- LogLoss(train_prob, y_train_num)
+test_logloss  <- LogLoss(test_prob,  y_test_num)
+
+cat("-------------------------------------------\n")
+cat(" LOSS FUNCTION — Binary Cross-Entropy\n")
+cat("-------------------------------------------\n")
+cat(sprintf("  Training log-loss       : %.4f\n", train_logloss))
+cat(sprintf("  Test log-loss           : %.4f\n", test_logloss))
+cat(sprintf("  Random baseline (ln 2)  : 0.6931\n"))
+cat(sprintf("  Improvement vs baseline : %.1f%%\n\n",
+            100 * (0.6931 - test_logloss) / 0.6931))
+
+# Overfitting diagnostic
+gap <- test_logloss - train_logloss
+cat(sprintf("  Train-test gap          : %.4f", gap))
+if (gap > 0.05) {
+  cat("  — possible overfitting: test loss is notably higher than train\n")
+} else {
+  cat("  — model generalises well: train and test loss are close\n")
+}
+
+cat("\n")
+if      (test_logloss < 0.40) {
+  cat("  Rating: Excellent — substantially better than random\n")
+} else if (test_logloss < 0.55) {
+  cat("  Rating: Good — meaningfully better than random\n")
+} else if (test_logloss < 0.65) {
+  cat("  Rating: Modest — only slightly better than random\n")
+} else {
+  cat("  Rating: Poor — near random; revisit feature selection\n")
+}
+```
+
+## 7b — AUC-ROC: Ranking Quality
+
+```{r roc-auc}
+# The ROC (Receiver Operating Characteristic) curve plots the True Positive Rate
+# (Sensitivity) against the False Positive Rate at every possible probability
+# threshold from 0 to 1.
+#
+# AUC = Area Under the ROC Curve
+#   AUC = 1.0  =>  perfect — every churner is ranked above every non-churner
+#   AUC = 0.5  =>  random — no discrimination ability at all
+#   AUC < 0.5  =>  worse than random (the model's ranking is effectively inverted)
+#
+# Key property: AUC is threshold-independent. It measures how well the model
+# RANKS customers by churn risk, regardless of where you set the decision cutoff.
+# This makes AUC robust and meaningful on imbalanced datasets.
+
+roc_obj <- roc(
+  response  = test_scaled$churn,
+  predictor = test_prob,
+  levels    = c("No", "Yes"),
+  direction = "<"   # higher probability corresponds to the positive class ("Yes")
+)
+
+auc_val <- auc(roc_obj)
+
+cat(sprintf("AUC-ROC: %.4f\n\n", auc_val))
+cat(sprintf("Interpretation: the model correctly ranks a randomly chosen churner\n"))
+cat(sprintf("above a randomly chosen non-churner %.1f%% of the time.\n", auc_val * 100))
+
+# ── Plot the ROC curve ─────────────────────────────────────────────────────────
+plot(
+  roc_obj,
+  col  = "tomato",
+  lwd  = 2.5,
+  main = sprintf("ROC Curve — Churn Prediction  |  AUC = %.4f", auc_val),
+  xlab = "False Positive Rate (1 - Specificity)",
+  ylab = "True Positive Rate (Sensitivity / Recall)"
+)
+# Diagonal line = random classifier baseline (AUC = 0.5)
+abline(a = 0, b = 1, lty = 2, col = "grey60", lwd = 1.5)
+
+legend(
+  "bottomright",
+  legend = c(sprintf("Logistic Regression (AUC = %.3f)", auc_val),
+             "Random Classifier  (AUC = 0.500)"),
+  col    = c("tomato", "grey60"),
+  lwd    = c(2.5, 1.5),
+  lty    = c(1, 2),
+  bty    = "n"
+)
+
+# Shade the area under the curve for visual emphasis
+polygon(
+  c(roc_obj$specificities, 0),
+  c(roc_obj$sensitivities, 0),
+  col    = adjustcolor("tomato", alpha.f = 0.12),
+  border = NA
+)
+```
+
+## 7c — Confusion Matrix and Classification Metrics
+
+```{r predictions-and-confusion}
+# ── Convert probabilities to class labels ─────────────────────────────────────
+# At threshold = 0.5: if P(churn) > 0.5 predict "Yes", otherwise predict "No".
+#
+# 0.5 is the default threshold, not necessarily the optimal one. In practice
+# you might lower it (e.g. to 0.3) to catch more actual churners at the cost
+# of more false alarms. This is a business decision, not a model decision.
+
+test_pred <- ifelse(test_prob > 0.5, "Yes", "No") %>%
+  factor(levels = c("No", "Yes"))
+
+# ── Confusion Matrix ───────────────────────────────────────────────────────────
+# The four cells:
+#
+#   True Positive  (TP): predicted "Yes", actual "Yes"  — correctly caught churner
+#   True Negative  (TN): predicted "No",  actual "No"   — correctly retained customer
+#   False Positive (FP): predicted "Yes", actual "No"   — unnecessary intervention
+#   False Negative (FN): predicted "No",  actual "Yes"  — missed churner (often costly)
+#
+# positive = "Yes" tells caret which class is the event of interest, so that
+# Sensitivity, Precision, and Recall are all computed with respect to churn.
+
+cm <- confusionMatrix(
+  data      = test_pred,
+  reference = test_scaled$churn,
+  positive  = "Yes"
+)
+
+print(cm)
+```
+
+## 7d — Confusion Matrix Heatmap
+
+```{r confusion-plot}
+# A heatmap version of the confusion matrix is easier to scan at a glance
+# than a raw numeric table.
+
+cm_table       <- as.data.frame(cm$table)
+names(cm_table) <- c("Predicted", "Actual", "Count")
+
+total          <- sum(cm_table$Count)
+cm_table$Pct   <- percent(cm_table$Count / total, accuracy = 0.1)
+cm_table$Label <- paste0(cm_table$Count, "\n(", cm_table$Pct, ")")
+
+ggplot(cm_table, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(colour = "white", linewidth = 1.5) +
+  geom_text(aes(label = Label), size = 7, fontface = "bold", colour = "white") +
+  scale_fill_gradient(low = "steelblue", high = "tomato") +
+  labs(
+    title    = "Confusion Matrix — Test Set",
+    subtitle = "Rows = Predicted class | Columns = Actual class",
+    fill     = "Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## 7e — Complete Metrics Summary
+
+```{r metrics-summary-table}
+# Collect all key metrics from the confusionMatrix object into one summary table.
+# Each metric answers a different question about model quality.
+
+accuracy    <- cm$overall["Accuracy"]
+precision   <- cm$byClass["Precision"]    # of all predicted churners, how many actually churned?
+recall      <- cm$byClass["Recall"]       # of all actual churners, how many did we catch?
+f1          <- cm$byClass["F1"]           # harmonic mean of precision and recall
+specificity <- cm$byClass["Specificity"]  # of all actual non-churners, how many correctly labelled?
+
+metrics_table <- tibble(
+  Metric = c(
+    "Accuracy",
+    "Precision",
+    "Recall (Sensitivity)",
+    "Specificity",
+    "F1-Score",
+    "Log-Loss",
+    "AUC-ROC"
+  ),
+  Value = c(
+    percent(accuracy,    accuracy = 0.1),
+    percent(precision,   accuracy = 0.1),
+    percent(recall,      accuracy = 0.1),
+    percent(specificity, accuracy = 0.1),
+    round(f1,           4),
+    round(test_logloss, 4),
+    round(auc_val,      4)
+  ),
+  Interpretation = c(
+    "Percentage of all predictions that are correct",
+    "Of all predicted churners, how many actually churned?",
+    "Of all actual churners, what fraction did we catch?",
+    "Of all actual non-churners, what fraction did we correctly identify?",
+    "Harmonic mean of Precision and Recall — 1.0 is perfect",
+    "Lower is better | 0.6931 = coin-flip baseline",
+    "Higher is better | 0.5 = coin-flip | 1.0 = perfect"
+  )
+)
+
+metrics_table %>%
+  kable(caption = "Complete Model Evaluation — Test Set") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(5:7, bold = TRUE, background = "#f0f4f8")
+```
+
+**Which metric matters most in a churn problem?**  
+Recall (catching actual churners) is typically more important than Precision.
+A missed churner represents permanently lost revenue; a false alarm costs one
+retention call. The business context determines which metric to prioritise,
+and the optimal threshold can be shifted on the ROC curve to reflect that priority.
+
+---
+
+# Step 8 — Final Summary
+
+```{r final-summary}
+cat("======================================================\n")
+cat("  CHURN PREDICTION MODEL — COMPLETE SUMMARY\n")
+cat("======================================================\n\n")
+
+cat("  DATA\n")
+cat(sprintf("  |- Dataset          : %d customers, %d total columns\n", nrow(df), ncol(df)))
+cat(sprintf("  |- Features used    : %d (after correlation filtering)\n", length(selected_features)))
+cat(sprintf("  '- Train/Test split : 80%%/20%% stratified (seed = 42)\n\n"))
+
+cat("  PREPROCESSING\n")
+cat("  |- Response variable cast to factor (required for glm binomial)\n")
+cat("  |- Features filtered: |Pearson r| > 0.10 with churn\n")
+cat("  |- Log-transform duplicates removed: loglong, lninc\n")
+cat("  '- StandardScaler applied (center + scale, fitted on train only)\n\n")
+
+cat("  MODEL\n")
+cat("  '- glm(family = binomial(link = 'logit')) — Logistic Regression\n\n")
+
+cat("  PERFORMANCE — TEST SET\n")
+cat(sprintf("  |- Accuracy    : %s\n",  percent(accuracy,    accuracy = 0.1)))
+cat(sprintf("  |- Precision   : %s\n",  percent(precision,   accuracy = 0.1)))
+cat(sprintf("  |- Recall      : %s\n",  percent(recall,      accuracy = 0.1)))
+cat(sprintf("  |- Specificity : %s\n",  percent(specificity, accuracy = 0.1)))
+cat(sprintf("  |- F1-Score    : %.4f\n",  f1))
+cat(sprintf("  |- Log-Loss    : %.4f  (random baseline: 0.6931)\n", test_logloss))
+cat(sprintf("  '- AUC-ROC     : %.4f  (random baseline: 0.5000)\n", auc_val))
+cat("======================================================\n")
+```
+
+---
+
+# Concepts Recap
+
+| Concept | R Tool | Why It Matters |
+|---------|--------|----------------|
+| Binary categorical outcome | `factor(churn, levels = c(0,1))` | Required for `glm()` to apply logistic, not linear, regression |
+| Sigmoid function | Built into `glm(family = binomial)` | Maps the linear predictor to a valid probability in (0, 1) |
+| Feature selection | Pearson correlation, threshold `|r| > 0.10` | Removes noise and controls multicollinearity |
+| Multicollinearity check | `corrplot()` heatmap | Identifies redundant predictors to remove |
+| z-score normalisation | `caret::preProcess("center", "scale")` | Ensures the IRLS optimiser converges reliably |
+| No data leakage | Scaler fitted on training set only | Prevents inflated test-set performance metrics |
+| Log-Loss | `MLmetrics::LogLoss()` | The actual loss function — penalises confident wrong predictions |
+| AUC-ROC | `pROC::roc()` and `auc()` | Threshold-independent ranking quality — robust to class imbalance |
+| Confusion Matrix | `caret::confusionMatrix()` | Exposes TP / TN / FP / FN and all derived classification metrics |
+| Odds Ratios | `exp(coef(model))` | Converts log-odds coefficients into interpretable effect sizes |
+
+---
+
+# Suggested Next Steps
+
+**1. Handle class imbalance with class weights**
+
+```r
+# Penalise missing a churner more heavily than a false alarm.
+model_weighted <- glm(
+  churn ~ .,
+  data    = train_scaled,
+  family  = binomial,
+  weights = ifelse(train_scaled$churn == "Yes", 3, 1)
+)
+```
+
+**2. Optimise the classification threshold**
+
+```r
+# The default 0.5 threshold is rarely optimal.
+# Sweep across candidate thresholds and select the one that maximises
+# the metric most relevant to the business (e.g. Recall or F1-Score).
+thresholds <- seq(0.1, 0.9, by = 0.05)
+```
+
+**3. Regularised logistic regression (LASSO / Ridge)**
+
+```r
+library(glmnet)
+# L1 penalty (LASSO) automatically shrinks unimportant coefficients to zero,
+# providing built-in feature selection and reducing the risk of overfitting.
+```
+
+**4. Stepwise feature selection guided by AIC**
+
+```r
+# AIC balances model fit against complexity.
+# step() adds or removes predictors greedily to minimise AIC.
+model_step <- step(model, direction = "both")
+```
+
+**5. Compare against non-linear models**
+
+```r
+library(randomForest)
+library(xgboost)
+# Tree-based ensemble methods capture non-linear relationships and feature
+# interactions that logistic regression cannot express. Comparing results
+# tells you whether the linear assumptions are adequate for this dataset.
+```
+
+---
+
+*End of notebook. You now have a rigorous, fully documented foundation in logistic
+regression — covering data preparation, feature selection, normalisation, model
+training, loss-function evaluation, and coefficient interpretation. Every concept
+here transfers directly to any binary classification problem.*
