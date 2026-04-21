@@ -1,171 +1,250 @@
 # Customer Churn Prediction — Logistic Regression
 
-> *A complete teaching notebook. From raw data to confident interpretation — no step skipped, no decision left unexplained.*
+A telecom company is bleeding customers. Quietly, one by one, people are cancelling
+their subscriptions — and the company only finds out after they are gone.
+
+The question this notebook answers: **can we see it coming?**
 
 ---
 
-## What This Is
+## The Business Problem
 
-A fully annotated R notebook that teaches logistic regression the way it should be taught: through a real business problem, with every modelling decision explained before any code is written.
+Every month, some customers stay and some leave. The ones who leave are called
+**churners**. If you could identify them *before* they cancelled, you could
+intervene — a call, a discount, a better plan. You could protect revenue instead
+of mourning it.
 
-The dataset is a telecom company's customer records. The question is simple:
-**which customers are about to leave — and why?**
-
-That question makes logistic regression not just a statistical exercise but a revenue problem. The notebook keeps that tension alive throughout.
-
----
-
-## The Problem With Most Tutorials
-
-Most introductions to logistic regression hand you `glm()` in the first five minutes. You get output. You have no idea what the output means, why the data needed to be prepared the way it was, or what would have gone wrong if you had skipped any of the setup steps.
-
-This notebook does the opposite. It earns each step.
+This is a supervised binary classification problem. Each customer either churned
+(`Yes`) or did not (`No`). The model's job is to learn the difference from
+historical data, then flag at-risk customers before they walk out.
 
 ---
 
-## What You Will Learn
+## Why Not Just Use Linear Regression?
 
-Work through this notebook once and you will be able to answer all of the following — not by looking them up, but because you watched each issue arise and watched it get solved.
+The natural instinct is to reach for the familiar tool. Predict a number — you
+know how to do that. But churn is not a number. It is a verdict. A customer either
+left or they did not.
 
-**The model itself**
-- Why logistic regression exists at all — what breaks when you use linear regression on a binary outcome
-- What the sigmoid function does and why it guarantees a valid probability
-- What log-odds are, and why the model operates in that space instead of probability space
-- What IRLS is and how `glm()` actually fits the model
+Force linear regression onto this problem and it will produce answers like `1.4`
+or `-0.2`. Those are not probabilities. They are nonsense.
 
-**Data preparation**
-- Why `churn` must be cast to a factor before any modelling — and what R does silently if you forget
-- What point-biserial correlation is and how to use it for feature selection
-- What multicollinearity is, how to detect it with a heatmap, and which predictor to drop when two tell the same story
-- Why z-score normalisation is not optional — and what "data leakage" means and costs you
-- Why the scaler must be fitted on training data only, then applied to both sets
+**Logistic regression** wraps the same linear equation inside a sigmoid function:
 
-**Evaluation**
-- Why accuracy is the wrong headline metric on imbalanced data
-- What log-loss is, what it penalises, and what `0.6931` means as a baseline
-- What AUC-ROC measures and why it is threshold-independent
-- What the four cells of a confusion matrix represent in business terms (a missed churner is not the same cost as a false alarm)
-- When to favour Recall over Precision — and how to shift that tradeoff on the ROC curve
+$$P(\text{churn} = 1 \mid \mathbf{x}) = \frac{1}{1 + e^{-(\beta_0 + \beta_1 x_1 + \cdots + \beta_k x_k)}}$$
 
-**Interpretation**
-- How to convert log-odds coefficients into odds ratios
-- How to read a coefficient forest plot and what it means when a confidence interval crosses zero
-- How to write a sentence about a model result that a non-statistician will believe
+The sigmoid squeezes any real number — positive, negative, enormous — into the
+interval (0, 1). Every output is a valid probability. A customer with score `0.82`
+carries high churn risk. A customer at `0.11` is likely to stay.
+
+Internally, the model still works with a linear equation — but in **log-odds
+space**:
+
+$$\log\!\left(\frac{p}{1-p}\right) = \beta_0 + \beta_1 x_1 + \cdots + \beta_k x_k$$
+
+The sigmoid is just the transformation that brings you back to probabilities when
+you need a decision.
 
 ---
 
-## Notebook Structure
+## Before the Model: Understanding the Data
 
-| Step | What Happens | The Lesson |
-|------|-------------|------------|
-| 1 | Load libraries | All dependencies declared upfront — prevents mid-analysis surprises |
-| 2 | EDA — structure, summaries, missing values, class balance | Never touch a model before you understand the data |
-| 3 | Cast `churn` to factor | Without this, `glm()` fits linear regression; predictions escape [0,1] |
-| 4 | Feature selection | Point-biserial correlation threshold; multicollinearity heatmap; drop log-transform duplicates |
-| 5 | Normalisation | Stratified 80/20 split first; scaler fitted on train only; verified post-scaling |
-| 6 | Train the model | `glm(family = binomial(link = "logit"))`; raw summary; odds ratios; forest plot |
-| 7 | Evaluate | Log-loss, AUC-ROC, confusion matrix heatmap, full metrics table |
-| 8 | Final summary | Consolidated printout of data, preprocessing, and all test-set metrics |
+A model trained on data it does not understand is a model you cannot trust.
 
-A concepts recap table and five suggested next steps follow the main pipeline.
+The notebook begins with a full exploratory analysis: structure, summary statistics,
+a missing value audit, and a class balance check. That last one matters more than
+beginners expect. If 93% of customers in the dataset did not churn, a model that
+always says "No" achieves 93% accuracy while being completely useless. Accuracy
+flatters bad models on imbalanced data. This notebook uses better metrics.
 
 ---
 
-## Requirements
+## The Step Everyone Skips: Casting the Outcome to a Factor
 
-**R packages** — install once, then the notebook loads them all:
+`churn` arrives in the dataset as numeric — `0` and `1`. That looks fine. It is not.
+
+When R's `glm()` sees a numeric outcome, it fits **linear regression**. The sigmoid
+is never applied. The log-likelihood is never maximised. The entire machinery of
+logistic regression is bypassed in silence.
 
 ```r
-install.packages(c(
-  "tidyverse",    # dplyr, ggplot2, readr, forcats
-  "corrplot",     # correlation heatmap
-  "scales",       # percent(), comma(), dollar() axis labels
-  "caret",        # createDataPartition(), preProcess(), confusionMatrix()
-  "pROC",         # roc(), auc()
-  "MLmetrics",    # LogLoss()
-  "broom",        # tidy() — clean glm() output
-  "knitr",        # kable()
-  "kableExtra"    # table styling
-))
+df$churn <- factor(df$churn, levels = c(0, 1), labels = c("No", "Yes"))
 ```
 
-**Data file** — place `ChurnData.csv` in your working directory before knitting.
-
-```r
-getwd()          # check where R is looking
-setwd("your/path/here")   # or use the Files pane in RStudio
-```
+One line. It tells `glm()`: *this is a category, not a measurement. Apply the
+binomial family. Use the logit link.* Every logistic regression pipeline begins here.
 
 ---
 
-## Rendering the Notebook
+## Choosing Which Features to Keep
+
+Not every column deserves to be in the model.
+
+Irrelevant features add noise. Correlated features fight each other — when two
+predictors tell the same story, the model cannot decide how much credit to give each
+one, and both coefficients become unstable and uninterpretable.
+
+The notebook uses **point-biserial correlation** to score each feature against the
+churn outcome. Features below the `|r| > 0.10` threshold carry almost no linear
+signal and are dropped. A correlation heatmap then checks whether any surviving
+features are too similar to each other.
+
+The dataset contains `loglong` and `lninc` — log-transformed versions of `longmon`
+and `income`. Including both the original and the log transform is like counting
+the same evidence twice. One of each pair is dropped.
+
+What remains is a lean set of predictors: everything that matters, nothing that
+clutters.
+
+---
+
+## Normalisation: The Step That Determines Whether Training Works
+
+`income` ranges from near zero to over a thousand. A binary contract flag sits at
+zero or one. The model sees both in the same equation.
+
+R's `glm()` fits logistic regression using **Iteratively Reweighted Least Squares
+(IRLS)** — an iterative algorithm that nudges coefficients toward the maximum of
+the log-likelihood surface one step at a time. When features live on wildly
+different scales, those steps are uneven: the optimiser either crawls on
+large-scale features or overshoots on small ones. Convergence is slow, unreliable,
+or both.
+
+Z-score standardisation solves this:
+
+$$z = \frac{x - \mu_{\text{train}}}{\sigma_{\text{train}}}$$
+
+After scaling, every feature has mean zero and standard deviation one. The optimiser
+works in a uniform space. The shape of every distribution is preserved — only the
+units change.
+
+**The rule that cannot bend:** the scaler is fitted on training data only, then
+applied identically to both sets. Fitting on the full dataset lets test-set
+information leak into training. Metrics look better than they are. The model is
+evaluated on data it has already seen, in disguise. This is called **data leakage**,
+and it is how models that perform beautifully in the notebook fail quietly in
+production.
+
+---
+
+## Training the Model
+
+Once the data is correctly prepared, the modelling step is brief:
+
+```r
+model <- glm(
+  churn ~ .,
+  data   = train_scaled,
+  family = binomial(link = "logit")
+)
+```
+
+The hard work was everything before this line.
+
+`glm()` returns coefficients in **log-odds units**. A positive coefficient means
+that feature pushes the probability of churn upward. A negative coefficient
+suppresses it. The magnitude tells you how much.
+
+Exponentiate the coefficients and they become **odds ratios** — which are far easier
+to communicate:
+
+> *A one-standard-deviation increase in long-distance call minutes is associated
+> with 50% higher odds of churning, holding all other features constant.*
+
+A **forest plot** visualises every coefficient alongside its 95% confidence
+interval. If an interval bar crosses zero, the effect may not be statistically
+reliable — the model is uncertain whether that feature moves churn risk at all.
+
+---
+
+## Evaluating the Model
+
+### Log-Loss: What the Model Actually Minimised
+
+During training, logistic regression did not try to maximise accuracy. It minimised
+**log-loss** — binary cross-entropy:
+
+$$\mathcal{L} = -\frac{1}{n} \sum_{i=1}^{n} \Bigl[ y_i \cdot \log(\hat{p}_i) + (1 - y_i) \cdot \log(1 - \hat{p}_i) \Bigr]$$
+
+Log-loss punishes confident wrong predictions harshly. A model that says
+P(churn) = 0.99 for a customer who then stays has made a confident mistake. The
+penalty is large. This pressure is what teaches the model to be **well-calibrated**:
+not just directionally correct, but appropriately uncertain when the signal is weak.
+
+The random baseline is `0.6931` — the log-loss of a coin flip. A useful model
+scores below it. A model scoring above it is worse than knowing nothing.
+
+### AUC-ROC: Can the Model Rank Risk?
+
+The ROC curve asks a different question: if you pick one random churner and one
+random non-churner, what is the probability the model assigns the higher risk score
+to the churner?
+
+That probability is the **AUC** — Area Under the Curve. A random model scores
+`0.5`. A perfect model scores `1.0`. AUC does not care about the classification
+threshold at all — it measures pure ranking quality, which is why it holds up on
+imbalanced datasets where accuracy misleads.
+
+### The Confusion Matrix: A Map of the Errors
+
+At threshold `0.5`, every predicted probability becomes a label. The confusion
+matrix tallies the four outcomes:
+
+| | Predicted No | Predicted Yes |
+|---|---|---|
+| **Actual No** | True Negative ✓ | False Positive — unnecessary intervention |
+| **Actual Yes** | False Negative — missed churner | True Positive ✓ |
+
+In a churn problem, **False Negatives are expensive**. A missed churner represents
+permanently lost revenue. A false positive costs one retention call. The business
+context determines which error to minimise — and the threshold on the ROC curve
+can be shifted to reflect that priority.
+
+---
+
+## What the Numbers Tell You
+
+The notebook closes with a complete metrics table — accuracy, precision, recall,
+specificity, F1-score, log-loss, and AUC-ROC — with plain-language interpretations
+for each, and a final printed summary consolidating every decision made across the
+full pipeline.
+
+---
+
+## Running the Notebook
+
+Place `ChurnData.csv` in your working directory, then:
 
 ```r
 rmarkdown::render("Churn_LogisticRegression_Teaching.Rmd")
 ```
 
-Output: a self-contained HTML file with a floating table of contents, numbered sections, and all code visible (`code_folding: show`). Open it in any browser.
-
----
-
-## A Note on the `if / else` Pattern in R
-
-One thing this notebook will teach you implicitly: R's parser treats a brace-less `if` body as a complete expression the moment it hits a newline.
+**Required packages:**
 
 ```r
-# This breaks — R considers the if finished before it sees else
-if (x < 0.4) cat("Good")
-else          cat("Poor")   # Error: unexpected 'else'
-
-# This works — the closing } tells R more is coming
-if (x < 0.4) {
-  cat("Good")
-} else {
-  cat("Poor")
-}
+install.packages(c(
+  "tidyverse", "corrplot", "scales",
+  "caret", "pROC", "MLmetrics",
+  "broom", "knitr", "kableExtra"
+))
 ```
 
-Always use braces in multi-branch `if / else if / else` chains. The notebook follows this convention throughout.
+Output is a self-contained HTML file with a floating table of contents, numbered
+sections, and all code visible — every line annotated, every decision explained.
 
 ---
 
-## Concepts at a Glance
+## Where to Go Next
 
-| Concept | R tool used | Why it matters |
-|---------|-------------|----------------|
-| Binary outcome → factor | `factor(churn, levels = c(0,1))` | Triggers binomial family in `glm()` |
-| Sigmoid function | Built into `glm(family = binomial)` | Maps log-odds to valid probability in (0, 1) |
-| Feature–outcome correlation | `cor()` + threshold `\|r\| > 0.10` | Removes noise, focuses the model |
-| Multicollinearity detection | `corrplot()` heatmap | Identifies redundant predictors |
-| Z-score normalisation | `caret::preProcess("center", "scale")` | Ensures IRLS converges reliably |
-| No data leakage | Scaler fitted on train only | Honest evaluation metrics |
-| Log-loss | `MLmetrics::LogLoss()` | What the model actually minimises |
-| AUC-ROC | `pROC::roc()` + `auc()` | Threshold-independent ranking quality |
-| Confusion matrix | `caret::confusionMatrix()` | TP / TN / FP / FN and all derived metrics |
-| Odds ratios | `exp(coef(model))` | Interpretable effect sizes for each predictor |
+The notebook ends with working stubs for five natural extensions:
+
+- **Class weights** — penalise missed churners more heavily than false alarms
+- **Threshold optimisation** — find the cutoff that fits your business cost structure
+- **LASSO / Ridge regularisation** — built-in feature selection via `glmnet`
+- **Stepwise selection by AIC** — let `step()` prune the model greedily
+- **Non-linear comparison** — `randomForest` and `xgboost`, to test whether the linear assumptions are enough
 
 ---
 
-## Suggested Next Steps
-
-The notebook ends with working code stubs for five extensions:
-
-1. **Class weights** — penalise missed churners more heavily than false alarms
-2. **Threshold optimisation** — sweep the ROC curve to find the cutoff that fits the business cost structure
-3. **Regularised logistic regression** — LASSO / Ridge via `glmnet`, with built-in feature selection
-4. **Stepwise selection by AIC** — let `step()` prune the model greedily
-5. **Non-linear comparison** — `randomForest` and `xgboost` to test whether the linear assumptions hold
-
----
-
-## Who This Is For
-
-- Students encountering logistic regression for the first time who want to understand the *why*, not just the *how*
-- Practitioners who have used `glm()` but never felt confident interpreting the output
-- Instructors who want a ready-made, heavily commented classroom notebook
-
-By the end, the pipeline you have built — correlation-filtered features, leak-free normalisation, properly cast outcome, rigorous multi-metric evaluation — transfers directly to any binary classification problem you will ever face.
-
----
-
-*Built with R · tidyverse · caret · pROC · MLmetrics · broom*
+*Everything here transfers directly to any binary classification problem you will
+ever face. The dataset changes. The pipeline does not.*
