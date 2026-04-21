@@ -262,5 +262,8 @@ By the end, the pipeline you have built — correlation-filtered features, leak-
 
 
 *Built with R · tidyverse · caret · pROC · MLmetrics · broom*
+
+---
+
 *Everything here transfers directly to any binary classification problem you will
 ever face. The dataset changes. The pipeline does not.*
